@@ -1,54 +1,61 @@
 # DeeplX API 可用性检测
 
-该仓库提供一个可在 GitHub Actions 中运行的脚本，用于批量检测沉浸式翻译 DeeplX 服务是否可用。脚本会读取一个包含服务地址的 CSV 文件，逐个向 `POST /translate` 发送测试请求并输出结果。
+该仓库提供一个 GitHub Actions 工作流，用最少的操作检测沉浸式翻译 DeeplX 服务是否可用。全程只需维护 `deeplx_endpoints.csv`，推送后运行工作流即可生成检测结果。
 
-## 快速开始
+## 使用教程（零基础体系）
 
-1. **准备 CSV 列表**  
-   编辑根目录下的 `deeplx_endpoints.csv`，填写 DeeplX 服务的基地址（即 `https://...`，不包含 `/translate`）。可以包含可选的 `name` 列，用于展示别名。
+**总流程：编辑 CSV → 推送仓库 → 运行工作流 → 查看报告。**
 
-   ```csv
-   name,base_url
-   官方节点,https://example.com/deeplx
-   备用节点,https://another-host.com/api
-   ```
+### 第 1 步：维护 `deeplx_endpoints.csv`
 
-2. **本地运行**  
-   安装依赖并执行脚本：
+- 文件位于仓库根目录，只需要填写 DeeplX 服务的基地址（不包含 `/translate`）。
+- 可选填 `name` 列，用于展示友好名称；若省略表头，脚本会默认第一列为地址、第二列为名称。
 
-   ```bash
-   pip install -r requirements.txt
-   python scripts/check_deeplx.py --csv deeplx_endpoints.csv
-   ```
+```csv
+name,base_url
+官方节点,https://example.com/deeplx
+备用节点,https://another-host.com/api
+```
 
-   常用参数：
+### 第 2 步：推送变更
 
-   - `--timeout`：请求超时时间（秒），缺省 5 秒。
-   - `--text` / `--source-lang` / `--target-lang`：自定义测试翻译内容。
-   - `--allow-partial`：允许部分节点失败时仍返回 0；默认情况下任一节点失败都会导致退出码为 1。
-   - `--json-output`：输出详细结果到 JSON 文件。
+```bash
+git add deeplx_endpoints.csv
+git commit -m "Update DeeplX endpoints"
+git push
+```
 
-3. **GitHub Actions 自动检测**  
-   仓库包含 `.github/workflows/check-deeplx.yml`，默认每小时和手动触发执行一次。该工作流会：
+推送即可触发定时任务（默认每小时）或手动在 GitHub Actions 页面运行一次。
 
-   - 安装 Python 依赖；
-   - 运行脚本并生成 `deeplx_results.json`；
-   - 将结果附加到步骤摘要与构建日志；
-   - 如果任一节点不可用，则失败；
-   - 无论成功与否都上传 `deeplx_results.json` 作为构建产物。
+### 第 3 步：运行 GitHub Actions
 
-   如果需要修改执行频率，只需调整 workflow 中的 `cron` 表达式，或根据需要添加 `push`、`pull_request` 等触发器。
+1. 进入仓库的 **Actions** 页签，选择 “DeeplX Availability Check”。
+2. 点击 “Run workflow”，确认使用默认分支并执行。
+3. 工作流会自动：
+   - 安装依赖并运行 `scripts/check_deeplx.py`；
+   - 读取 CSV 并对每个节点发起 `POST /translate` 请求；
+   - 将结果写入控制台、Step Summary 以及 `deeplx_results.json`；
+   - 任一节点失败时标记工作流失败，便于提醒关注。
 
-## 输出内容
+### 第 4 步：查看检测结果
 
-- **命令行**：以表格形式显示每个节点的状态、延迟和错误信息。
-- **GitHub Step Summary**：在工作流运行页面的 “Summary” 中展示 Markdown 表格。
-- **JSON 文件（可选）**：包含所有节点的原始响应信息，便于后续分析。
+- **Summary**：在 workflow run 页面顶部的 **Summary** 选项卡，可查看 Markdown 表格，总览每个节点的状态与延迟。
+- **Logs**：在 “Run DeeplX availability check” 步骤的日志中，可见终端表格输出。
+- **Artifacts**：点击右上角的 “Artifacts”，下载 `deeplx-results` 获取原始 JSON 数据。
 
-## 常见问题
+至此，无需任何额外配置，就可以完成 DeeplX 可用性巡检。
 
-- 如果某些节点需要鉴权或额外 Header，可在脚本中自行扩展对应逻辑。
-- 如果 CSV 没有表头，脚本会将第一列视为 `base_url`，第二列（如果有）视为名称。
-- 当 JSON 结构与预期不同但仍返回 200 时，脚本会标记为成功并提示 “JSON format unexpected”，可根据实际结构调整判断逻辑。
+## 进阶配置（可选）
 
-欢迎根据自身需求定制脚本或工作流。如果有改进建议，欢迎提交 PR。
+- **调整频率**：修改 `.github/workflows/check-deeplx.yml` 中的 `cron` 表达式即可。
+- **自定义测试文本**：在脚本中支持 `--text`、`--source-lang`、`--target-lang` 等参数；如需改动，可在 workflow 中调整对应命令。
+- **本地调试**：若想先行验证，可运行 `pip install -r requirements.txt` 后执行 `python scripts/check_deeplx.py --csv deeplx_endpoints.csv`。
+- **鉴权与 Header**：如节点需要额外 Header，可在 `scripts/check_deeplx.py` 中扩展 `requests.post` 的 `headers` 或参数。
+
+## 输出说明
+
+- **命令行表格**：列出名称、状态（OK/FAIL）、耗时、错误信息。
+- **Step Summary**：生成 Markdown 表格，适合快速浏览。
+- **JSON 报表**：详尽记录每个节点的状态码、耗时等，适合后续自动化分析。
+
+如需进一步定制，欢迎在此基础上拓展脚本或工作流。
