@@ -34,6 +34,7 @@ git push
 3. 工作流会自动：
    - 安装依赖并运行 `scripts/check_deeplx.py`；
    - 读取 CSV 并对每个节点发起 `POST /translate` 请求；
+   - 默认测试 `Hello`、`Good morning`、`Testing` 三个英文短语，确认译文与原文不同；
    - 将结果写入控制台、Step Summary 以及 `deeplx_results.json`；
    - 任一节点失败时标记工作流失败，便于提醒关注。
 
@@ -48,7 +49,7 @@ git push
 ## 进阶配置（可选）
 
 - **调整频率**：修改 `.github/workflows/check-deeplx.yml` 中的 `cron` 表达式即可。
-- **自定义测试文本**：在脚本中支持 `--text`、`--source-lang`、`--target-lang` 等参数；如需改动，可在 workflow 中调整对应命令。
+- **自定义测试文本**：在脚本中支持 `--text`、`--source-lang`、`--target-lang` 等参数；如需改动，可在 workflow 中调整对应命令，例如追加 `--text "Hello"` `--text "DeepL"` 以检测更多样本。
 - **本地调试**：若想先行验证，可运行 `pip install -r requirements.txt` 后执行 `python scripts/check_deeplx.py --csv deeplx_endpoints.csv`。
 - **鉴权与 Header**：如节点需要额外 Header，可在 `scripts/check_deeplx.py` 中扩展 `requests.post` 的 `headers` 或参数。
 

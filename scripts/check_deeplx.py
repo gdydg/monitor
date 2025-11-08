@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
@@ -21,9 +22,17 @@ import requests
 from requests import Response
 
 
-DEFAULT_TEST_TEXT = "Hello, world!"
+DEFAULT_TEST_TEXTS = ["Hello", "Good morning", "Testing"]
 DEFAULT_SOURCE_LANG = "EN"
 DEFAULT_TARGET_LANG = "ZH"
+
+
+@dataclass
+class SampleResult:
+    text: str
+    translation: Optional[str]
+    success: bool
+    detail: str
 
 
 @dataclass
@@ -35,6 +44,7 @@ class EndpointResult:
     status_code: Optional[int]
     elapsed: float
     detail: str
+    samples: List[SampleResult]
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -55,8 +65,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--text",
-        default=DEFAULT_TEST_TEXT,
-        help="Sample text to translate (default: %(default)s).",
+        dest="texts",
+        action="append",
+        help=(
+            "Sample text to translate. Provide multiple times to test several phrases "
+            "(default: built-in sample list)."
+        ),
     )
     parser.add_argument(
         "--source-lang",
@@ -136,10 +150,80 @@ def build_payload(text: str, source_lang: str, target_lang: str) -> dict:
     }
 
 
+def extract_translation(payload: object) -> Optional[str]:
+    """
+    Attempt to extract a translated string from a DeeplX-like response payload.
+    Searches common fields recursively and returns the first non-empty string encountered.
+    """
+
+    queue: deque[object] = deque([payload])
+    visited: set[int] = set()
+    preferred_keys = ("data", "text", "result", "translation")
+
+    while queue:
+        current = queue.popleft()
+        identifier = id(current)
+        if identifier in visited:
+            continue
+        visited.add(identifier)
+
+        if isinstance(current, str):
+            stripped = current.strip()
+            if stripped:
+                return stripped
+            continue
+
+        if isinstance(current, dict):
+            for key in preferred_keys:
+                if key in current:
+                    value = current[key]
+                    if isinstance(value, str):
+                        stripped_value = value.strip()
+                        if stripped_value:
+                            return stripped_value
+                    else:
+                        queue.append(value)
+
+            for value in current.values():
+                if isinstance(value, str):
+                    stripped_value = value.strip()
+                    if stripped_value:
+                        return stripped_value
+                elif isinstance(value, (dict, list)):
+                    queue.append(value)
+            continue
+
+        if isinstance(current, list):
+            for item in current:
+                if isinstance(item, str):
+                    stripped_item = item.strip()
+                    if stripped_item:
+                        return stripped_item
+                elif isinstance(item, (dict, list)):
+                    queue.append(item)
+
+    return None
+
+
+def is_translation_valid(source_text: str, translated_text: Optional[str]) -> bool:
+    if not translated_text:
+        return False
+
+    normalized_source = "".join(source_text.split()).lower()
+    normalized_translation = "".join(translated_text.split()).lower()
+
+    if not normalized_translation:
+        return False
+
+    return normalized_source != normalized_translation
+
+
 def check_endpoint(
     name: str,
     base_url: str,
-    payload: dict,
+    texts: Sequence[str],
+    source_lang: str,
+    target_lang: str,
     timeout: float,
 ) -> EndpointResult:
     normalized = base_url.rstrip("/")
@@ -148,35 +232,103 @@ def check_endpoint(
     start = time.perf_counter()
     detail = ""
     status_code: Optional[int] = None
-    success = False
+    samples: List[SampleResult] = []
+    total_samples = len(texts)
+    completed_samples = 0
+    last_exception: Optional[str] = None
 
-    try:
-        response: Response = requests.post(
-            full_url,
-            json=payload,
-            timeout=timeout,
-            headers={"User-Agent": "deeplx-availability-check/1.0"},
+    for sample_text in texts:
+        payload = build_payload(sample_text, source_lang, target_lang)
+        try:
+            response: Response = requests.post(
+                full_url,
+                json=payload,
+                timeout=timeout,
+                headers={"User-Agent": "deeplx-availability-check/1.1"},
+            )
+            status_code = response.status_code
+        except requests.exceptions.RequestException as exc:
+            last_exception = str(exc)
+            samples.append(
+                SampleResult(
+                    text=sample_text,
+                    translation=None,
+                    success=False,
+                    detail=str(exc),
+                )
+            )
+            break
+
+        if response.status_code != 200:
+            samples.append(
+                SampleResult(
+                    text=sample_text,
+                    translation=None,
+                    success=False,
+                    detail=f"HTTP {response.status_code}",
+                )
+            )
+            break
+
+        try:
+            data = response.json()
+        except ValueError:
+            samples.append(
+                SampleResult(
+                    text=sample_text,
+                    translation=None,
+                    success=False,
+                    detail="Non-JSON response",
+                )
+            )
+            break
+
+        translation = extract_translation(data)
+        if not is_translation_valid(sample_text, translation):
+            detail_msg = (
+                "Translation identical to source"
+                if translation
+                else "Missing translation field"
+            )
+            samples.append(
+                SampleResult(
+                    text=sample_text,
+                    translation=translation,
+                    success=False,
+                    detail=detail_msg,
+                )
+            )
+            break
+
+        samples.append(
+            SampleResult(
+                text=sample_text,
+                translation=translation,
+                success=True,
+                detail="OK",
+            )
         )
-        status_code = response.status_code
-        elapsed = time.perf_counter() - start
+        completed_samples += 1
 
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                # DeeplX responses commonly contain one of these keys.
-                if any(key in data for key in ("data", "text", "result", "translation")):
-                    success = True
-                    detail = "OK"
-                else:
-                    success = True
-                    detail = "OK (JSON format unexpected)"
-            except ValueError:
-                detail = "Non-JSON response"
+    elapsed = time.perf_counter() - start
+    success = completed_samples == total_samples
+
+    if success:
+        detail = f"All {total_samples} samples translated"
+    else:
+        failed_sample = next((sample for sample in samples if not sample.success), None)
+        if failed_sample:
+            translated_snippet = (
+                f" -> {failed_sample.translation}" if failed_sample.translation else ""
+            )
+            detail = (
+                f"Sample '{failed_sample.text}' failed: "
+                f"{failed_sample.detail}{translated_snippet}"
+            )
+        elif last_exception:
+            detail = f"Request failed: {last_exception}"
         else:
-            detail = f"HTTP {response.status_code}"
-    except requests.exceptions.RequestException as exc:
-        elapsed = time.perf_counter() - start
-        detail = str(exc)
+            detail = "Unknown failure"
 
     return EndpointResult(
         name=name,
@@ -186,6 +338,7 @@ def check_endpoint(
         status_code=status_code,
         elapsed=elapsed,
         detail=detail,
+        samples=samples,
     )
 
 
@@ -224,15 +377,18 @@ def write_summary(results: Sequence[EndpointResult]) -> None:
         f"- Available: {ok}",
         f"- Unavailable: {total - ok}",
         "",
-        "| Name | Status | Latency (s) | Detail |",
-        "| --- | --- | --- | --- |",
+        "| Name | Status | Latency (s) | Samples OK | Detail |",
+        "| --- | --- | --- | --- | --- |",
     ]
 
     for r in results:
         status = "✅" if r.success else "❌"
         latency = f"{r.elapsed:.3f}"
         detail = r.detail.replace("\n", " ")
-        lines.append(f"| {r.name} | {status} | {latency} | {detail} |")
+        sample_total = len(r.samples)
+        samples_ok = sum(sample.success for sample in r.samples)
+        sample_count = f"{samples_ok}/{sample_total}" if sample_total else "0/0"
+        lines.append(f"| {r.name} | {status} | {latency} | {sample_count} | {detail} |")
 
     with open(summary_path, "a", encoding="utf-8") as summary_file:
         summary_file.write("\n".join(lines))
@@ -249,6 +405,15 @@ def write_json(results: Sequence[EndpointResult], path: str) -> None:
             "status_code": r.status_code,
             "latency_seconds": r.elapsed,
             "detail": r.detail,
+            "samples": [
+                {
+                    "text": sample.text,
+                    "translation": sample.translation,
+                    "success": sample.success,
+                    "detail": sample.detail,
+                }
+                for sample in r.samples
+            ],
         }
         for r in results
     ]
@@ -265,11 +430,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"[error] {exc}", file=sys.stderr)
         return 2
 
-    payload = build_payload(args.text, args.source_lang, args.target_lang)
+    texts = args.texts or DEFAULT_TEST_TEXTS
 
     results: List[EndpointResult] = []
     for name, base_url in endpoints:
-        result = check_endpoint(name, base_url, payload=payload, timeout=args.timeout)
+        result = check_endpoint(
+            name=name,
+            base_url=base_url,
+            texts=texts,
+            source_lang=args.source_lang,
+            target_lang=args.target_lang,
+            timeout=args.timeout,
+        )
         results.append(result)
 
     print(format_results(results))
