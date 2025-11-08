@@ -1,0 +1,39 @@
+name: DeeplX Availability Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run DeeplX availability check
+        id: deeplx
+        continue-on-error: true
+        run: |
+          python scripts/check_deeplx.py --csv deeplx_endpoints.csv --json-output deeplx_results.json
+
+      - name: Upload raw results
+        if: ${{ always() && hashFiles('deeplx_results.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deeplx-results
+          path: deeplx_results.json
+
+      - name: Fail when availability check failed
+        if: ${{ steps.deeplx.outcome == 'failure' }}
+        run: exit 1
